@@ -1,0 +1,400 @@
+#### Linger TRES project notebook
+#### Isaac Miller-Crews 
+
+
+#### 05/20/2026
+# Summary: checking on data
+
+# Get gene count data: https://indiana.sharepoint.com/sites/msteams_863e21/Shared Documents/General/BL-OVPR-CGB/Labs/Rosvall/GSF3634_TreeSwallow/foldchange_highquality_gene/treeSwallowCounts.genes.xlsx
+# store data in /N/project/Multibrain_IMC/linger_TRES/data/treeSwallowCounts.genes.linger.csv
+
+# get DESeq2 results from 4 hour: https://indiana.sharepoint.com/sites/msteams_bfea0c/Shared Documents/Field Season by year/Field Season 2021/MJW heat blast exp 21/RNAseq/heat_BL_vs_control_BL.DESeq2_BowtieHighQualityGeneLevel_042723.xlsx 
+# store data in /N/project/Multibrain_IMC/linger_TRES/data/treeSwallowCounts.genes.linger.csv
+
+# get sample data for linger: https://indiana.sharepoint.com/sites/msteams_bfea0c/Shared Documents/Projects not within Field Seasons/Heat biomarker ms/RNAseq copy D12 sampled next day/Sample list.xlsx
+# store data in /N/project/Multibrain_IMC/linger_TRES/data/treeSwallowCounts.samples.linger.csv
+
+# get sample metadata from mastersheet:https://indiana.sharepoint.com/sites/msteams_bfea0c/Shared Documents/Projects not within Field Seasons/Heat biomarker ms/RNAseq copy D12 sampled next day/TRES Heat Linger Data 2023 Mastersheet.xlsx
+# store data in /N/project/Multibrain_IMC/linger_TRES/data/treeSwallowCounts.samples.meta.linger.csv
+# created clean version: treeSwallowCounts.samples.meta.linger.clean.csv
+
+# having issues comparing the metadata between samples 
+# so hand annotated
+
+# run basic QC (DEG, normalization, dendrogram, and PCA)
+
+# 1 DEG (down)
+# PCA is split by something not treatment (28%)
+# also tried: Avg.Trial.Temp.1, Time.Bled, Age_D2, hatch.date, Mean_above_38C
+
+# could be age? 
+
+# try running DEG with PCA category
+# now get 1 gene up and 2 down
+
+#### 05/21/2026
+# Summary: dealing with globin issues
+
+# Think need to remove globin genes?
+# the transcript tree_swallow000836 is orders of magnitude higher than other genes
+# looking at the fasta file, appears to be a hemoglobin subunit
+
+# same for: tree_swallow013530, tree_swallow018199, tree_swallow085468, tree_swallow012364
+
+# but not: tree_swallow016036, tree_swallow000314
+
+# also made list of viral genes from https://pmc.ncbi.nlm.nih.gov/articles/PMC8144624
+
+# when using PC_category as covariate get 2 up and 2 down DEG:
+http://127.0.0.1:33029/graphics/plot_zoom_png?width=2752&height=1045
+# can use interaction term (LRT) to identify genes that are different based on health status
+# can also identify genes that changes within each group
+
+# RRHO shows strong discordance indicating that health status matters
+# use RRHO quadrant genes Wald test results to identify biomarkers
+
+# so concordant genes should be in additive model (true heat biomarkers)
+# discordant genes should be in interaction (context specific biomarkers?)
+
+# still want a way of identifying sick and also sex
+# need to find genes on Z chromosome and also genes related to sickness
+
+# think it would be best to map transcriptome fasta onto a newer reference 
+
+# compare transcriptome fasta to barn swallow reference
+# download transcriptome fasta: https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE126210
+# save: data/GSE126210_submission.gene.fa
+
+# go to barnswallow reference: /N/project/Snseq_IMC/Bird_hypo_snseq/data/references/NCBI/barn_swallow/ncbi_dataset/data/GCF_015227805.2
+# makeblast database
+module load blast
+makeblastdb -in GCF_015227805.2_bHirRus1.pri.v3_genomic.fa -dbtype nucl -out genome_db
+
+# blast results
+blastn -query /N/project/Multibrain_IMC/linger_TRES/data/GSE126210_submission.gene.fa -db genome_db -out /N/project/Multibrain_IMC/linger_TRES/data/GSE126210_submission.gene.fa.blast.txt -outfmt 6
+
+# creates tsv with columns: TranscriptID, chrom, percent match, length, mismatch, number gap openings, start, end, start chrom, end chrom, evalue (lower better), bitscore (higher better)
+
+# z chromsome is: NC_053488.1
+# w chromosome is: NC_053487.1
+
+# using the ratio does make distinct groups of samples, but the Z:A is like ~0.85 and ~0.95
+
+# copy fastq files from CGB website into data folder: /N/project/Multibrain_IMC/linger_TRES/data/Linger_rnaseq/fastq
+
+# check file quality
+cd /N/project/Multibrain_IMC/linger_TRES/data/Linger_rnaseq/
+module load fastqc
+fastqc /*.gz
+
+# multiqc
+module load conda
+conda create --name multiqc_env multiqc
+conda activate multiqc_env
+multiqc .
+
+# multiqc_report.html is alright but seems like the samples are not amazing due to being blood
+
+# map and align rnaseq files to refernce genome: /N/project/Snseq_IMC/Bird_hypo_snseq/data/references/updated_ref/tree_swallow
+# fasta: ragtag.scaffold.fasta
+# gtf: tree_swallow_annotated.gtf
+# uses ragtag for chromosome and liftoff for gene annotation
+
+# index genome with star
+cd /N/project/Snseq_IMC/Bird_hypo_snseq/data/references/updated_ref/tree_swallow
+mkdir star
+module load star
+
+STAR \
+  --runThreadN 8 \
+  --runMode genomeGenerate \
+  --genomeDir star/ \
+  --genomeFastaFiles ragtag.scaffold.fasta \
+  --sjdbGTFfile tree_swallow_annotated.gtf
+
+# map files
+# first load in genome once
+STAR --genomeDir /N/project/Snseq_IMC/Bird_hypo_snseq/data/references/updated_ref/tree_swallow/star/ --genomeLoad LoadAndExit
+
+# Loop through read files
+for r1_file in fastq/*_R1_001.fastq.gz; do
+    
+    # Identify the matching reverse read file
+    r2_file="${r1_file/_R1_001.fastq.gz/_R2_001.fastq.gz}"
+    
+    # Extract the base sample name for the output prefix
+    base=$(basename "$r1_file" _R1_001.fastq.gz)
+    
+    STAR \
+      --runThreadN 8 \
+      --genomeDir /N/project/Snseq_IMC/Bird_hypo_snseq/data/references/updated_ref/tree_swallow/star/ \
+      --genomeLoad LoadAndKeep \
+--limitBAMsortRAM 10000000000 \
+      --readFilesIn "$r1_file" "$r2_file" \
+      --readFilesCommand zcat \
+      --outFileNamePrefix bams/"${base}"_ \
+      --outSAMtype BAM SortedByCoordinate \
+      --quantMode GeneCounts
+
+done
+
+
+# remove loaded in genome
+STAR --genomeDir /N/project/Snseq_IMC/Bird_hypo_snseq/data/references/updated_ref/tree_swallow/star/ --genomeLoad Remove
+
+# check bam files
+module load samtools
+# Loop through only the forward read files
+for r1_file in fastq/*_R1_001.fastq.gz; do
+    
+    # Extract the base sample name for the output prefix
+    base=$(basename "$r1_file" _R1_001.fastq.gz)
+
+samtools flagstat bams/"${base}"_Aligned.sortedByCoord.out.bam > bams/"${base}"_flagstat.txt
+
+done
+
+# run multiqc
+multiqc .
+# created multiqc_report_1.html
+
+# check gene counts across all files in bam folder:
+grep -w "SMAD4" *_ReadsPerGene.out.tab
+# w gene that seperates out high and low PC
+
+
+# can get read count table by combining all of these in R
+# use 4 column (reverse stranded based on the kit used)
+# get 17720 genes
+
+
+#### 05/22/2026
+# Summary: Re-run analysis with new mapping
+
+# create new R script to use new mapped files: linger_tres_gene_expression_script.R
+
+# new gene counts matrix: data/data.linger.gene.wide.csv
+
+# download gene annotation from barn swallow: https://www.ncbi.nlm.nih.gov/datasets/gene/GCF_015227805.2/
+# save: data/barn_swallow_ncbi_gene.tsv
+
+# use Z:A to define sex (compare with chromsome 5)
+# remove globin genes
+
+# run DEG, PCA, normalization
+# save DEG results: figures/DEG
+
+# use additive model for DEG (~Treatment + Sex)
+# get a handful of genes that are diff due to heat when controling for sex (heat volcano plot.png)
+
+# then run DEG with interaction (~Treatment*Sex)
+# use likelihood ratio test (LRT) to identify genes with significant interaction effect
+# data/res.interact.lrt.df.csv
+
+# then use Wald test to sex-dependent responses
+
+# We used LRT comparing full interaction model to reducded additive model to identify genes with sex-dependent response to heat treatment. Then, we used pairwise Wald test in the interaction to identify sex-specific responses to heat. 
+
+# with such small sample size I'm not sure if we can interpret LRT interaction results but can still use concordance...
+# so maybe bin genes as up-up that have no interaction effect (evidence of shared response) and as up-up that have an interaction effect (sex modulates direction?)
+
+# create list of stronger in males and stronger in females
+
+# WGCNA resulted in a bunch of modules that appear to have an interaction?
+
+#### 05/26/2026
+# Summary: WGCNA with sex removed and compare to first experiment
+
+# remove batcheffect from limma,to limit effect of sex to expose modules driven by treatment (keep design to remove just sex effects but keep more treatment/interaction structure)
+# should get rid of large sex biased modules related to sex chromosomes
+
+# download files from Experiment 1 (Woodruff project)
+# lots of other smaples run at the same time
+# going to download all and then delete what is not the blood samples
+
+cd /N/project/Multibrain_IMC/linger_TRES/data
+mkdir During_rnaseq
+cd During_rnaseq
+mkdir fastq
+cd fastq
+
+# multiple runs
+# download each run and rename
+# run 4 and 5 are only 1 GB each
+# run1 has all the files 
+# run3 only has 1 sample and run2 has 3
+mkdir run1
+cd run1
+wget https://lims.cgb.iu.edu/outbox/RosvallLab/GSF2996/run1/archive-GSF2996.tar --user=xxx --password=xxx 
+tar -xvf archive-GSF2996.tar
+rm archive-GSF2996.tar
+
+mv *BL* ..
+cd..
+rm -rf run1
+
+# check quality
+module load fastqc
+fastqc *.gz
+
+# map files
+# first load in genome once
+cd /N/project/Multibrain_IMC/linger_TRES/data/During_rnaseq
+
+module load star
+STAR --genomeDir /N/project/Snseq_IMC/Bird_hypo_snseq/data/references/updated_ref/tree_swallow/star/ --genomeLoad LoadAndExit
+
+# Loop through read files
+for r1_file in fastq/*_R1_001.fastq.gz; do
+    
+    # Identify the matching reverse read file
+    r2_file="${r1_file/_R1_001.fastq.gz/_R2_001.fastq.gz}"
+    
+    # Extract the base sample name for the output prefix
+    base=$(basename "$r1_file" _R1_001.fastq.gz)
+    
+    STAR \
+      --runThreadN 8 \
+      --genomeDir /N/project/Snseq_IMC/Bird_hypo_snseq/data/references/updated_ref/tree_swallow/star/ \
+      --genomeLoad LoadAndKeep \
+--limitBAMsortRAM 10000000000 \
+      --readFilesIn "$r1_file" "$r2_file" \
+      --readFilesCommand zcat \
+      --outFileNamePrefix bams/"${base}"_ \
+      --outSAMtype BAM SortedByCoordinate \
+      --quantMode GeneCounts
+
+done
+
+
+# remove loaded in genome
+STAR --genomeDir /N/project/Snseq_IMC/Bird_hypo_snseq/data/references/updated_ref/tree_swallow/star/ --genomeLoad Remove
+
+# check bam files
+module load samtools
+# Loop through only the forward read files
+for r1_file in fastq/*_R1_001.fastq.gz; do
+    
+    # Extract the base sample name for the output prefix
+    base=$(basename "$r1_file" _R1_001.fastq.gz)
+
+samtools flagstat bams/"${base}"_Aligned.sortedByCoord.out.bam > bams/"${base}"_flagstat.txt
+
+done
+
+# run multiqc
+multiqc .
+# created multiqc_report_1.html
+
+# check gene counts across all files in bam folder:
+grep -w "SMAD4" *_ReadsPerGene.out.tab
+# w gene that seperates out high and low PC
+
+
+# WGCNA modules, appear to have strong interaction effect in ME2, ME6, and ME,12
+
+# Module 6: 
+# padj_Treatment= 0.02
+# padj_Interaction= 0.017
+# table of concordance-
+#       -1   1
+#   -1 174   0
+#   1    1  69
+
+# Module 2: 
+# padj_Treatment= 0.13
+# padj_Interaction= 0.08
+# table of concordance-
+#       -1   1
+#   -1 477   9
+#   1   10 283
+
+# Module 12: 
+# padj_Treatment= 0.056
+# padj_Interaction= 0.07
+# table of concordance-
+#     -1  1
+#   -1 69  0
+#   1   0 53
+
+# seems like both sexes have concordant response to heat, with the magnitude higher in males. This could be due to both biological sex differences in response strength, but may also be due to higher variance due to the lower sample size in control females.  
+
+# can see from the log_fc scatterplot that the effect is stronger in males, but most sex-specific DEG appear to overlap (padj<0.05):
+# Sig    n
+# 1    Both   51
+# 2  Female    7
+# 3    Male   38
+# 4 Not sig 9208
+
+# get mapping statistics QC
+# Linger
+#              vars  n  mean   sd median trimmed  mad   min   max range  skew kurtosis   se
+# Total reads     1 19 12.91 6.88  10.53   12.08 3.14  6.28 33.53 27.25  1.50     1.68 1.58
+# Uniq aligned    2 19 79.23 2.23  79.51   79.33 2.21 73.63 83.10  9.47 -0.35     0.22 0.51
+
+# During
+#              vars n  mean   sd median trimmed  mad   min   max range  skew kurtosis   se
+# Total reads     1 6 25.19 5.15  25.23   25.19 5.86 18.14 30.67 12.53 -0.14    -2.01 2.10
+# Uniq aligned    2 6 87.22 1.06  87.12   87.22 1.26 85.86 88.65  2.79  0.08    -1.86 0.43
+
+# compared normalized gene expression zscore to temperature of the trial and of next day
+# saved in: figures/DEG/Temp/
+
+#### 05/27/2026
+# Summary: Tidy up figures and compare PCA of tree swallow VMT
+
+# Create boxplot of DEG (use heat DEG from additive and two genes that were in both sex-specific)
+
+# Use adult VMT data from CAGEE paper to graph PCA
+# /geode2/home/u040/imillerc/Quartz/CISAB_RNAseq_IMC/figures_all/
+# seems to be pretty clear seperateion (normalized counts file from DESEQ2)
+# TRES adults was 19%
+
+# calculate variance partition across the entire genome and take the average percent of variance explained
+
+# calculate statistics for mass and temp
+
+#### 05/29/2026
+# Summary: Create figures for paper
+
+# create new folder for paper figures: 'figures/paper'
+
+
+#### 05/30/2026
+# Summary: GO term
+
+# want to do GO analysis on sex-biased autosomal genes
+
+# first need to make a GO database
+# use 'makeOrgPackageFromNCBI' from AnnotationForge using barn swallow ncbi id: 43150
+# save it here: /N/project/Snseq_IMC/Bird_hypo_snseq/data/references/updated_ref/tree_swallow/
+# alternatively could try to download the GO gaf file: https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/015/227/805/GCF_015227805.2_bHirRus1.pri.v3/GCF_015227805.2-RS_2023_07_gene_ontology.gaf.gz
+
+#### 06/1/2026
+# Summary: upload files to SRA
+
+# upload both linger and during fastq files to SRA
+# save SRA files in /data/
+
+# during
+cd /N/project/Multibrain_IMC/linger_TRES/data/During_rnaseq/fastq
+sftp subftp@sftp-private.ncbi.nlm.nih.gov
+cd uploads/imillerc_iu.edu_zrRyu421
+mkdir TRES_BL_D12_biomarkers
+cd TRES_BL_D12_biomarkers
+mput *.fastq.gz
+
+# linger
+cd /N/project/Multibrain_IMC/linger_TRES/data/Linger_rnaseq/fastq
+sftp subftp@sftp-private.ncbi.nlm.nih.gov
+cd uploads/imillerc_iu.edu_zrRyu421
+cd TRES_BL_D12_biomarkers
+mput *.fastq.gz
+
+
+
+
+
+
+
+
